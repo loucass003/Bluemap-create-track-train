@@ -45,6 +45,12 @@ const signalYellowMaterial = new LineMaterial({
   resolution,
 });
 
+const selectMaterial = {
+  RED: signalRedMaterial,
+  GREEN: signalGreenMaterial,
+  YELLOW: signalYellowMaterial,
+};
+
 const objects = {
   tracks: new Map(),
   stations: new Map(),
@@ -55,7 +61,7 @@ const objects = {
 };
 
 function updateObjects(scene, map, data, createFn, updateFn) {
-  const existingKeys = new Set(map.keys());
+  const remainingKeys = new Set(map.keys());
   data.forEach((item, index) => {
     const id = item.id;
     if (!id) throw "no id";
@@ -66,9 +72,9 @@ function updateObjects(scene, map, data, createFn, updateFn) {
       scene.add(obj);
       map.set(id, obj);
     }
-    existingKeys.delete(id);
+    remainingKeys.delete(id);
   });
-  existingKeys.forEach((id) => {
+  remainingKeys.forEach((id) => {
     scene.remove(map.get(id));
     map.delete(id);
   });
@@ -81,62 +87,14 @@ function updateSceneObjects(map, data, createFn, updateFn) {
 function updateMarkerObjects(map, data, createFn, updateFn) {
   updateObjects(mapViewer.markers, map, data, createFn, updateFn);
 }
+const currentWorld = () =>
+  /\((?<name>.*)\)/.exec(mapViewer.map.data.name).groups.name;
+const isCurrentWorld = (world) =>
+  world.substring(world.indexOf(":") + 1) ===
+  /\((?<name>.*)\)/.exec(mapViewer.map.data.name).groups.name;
 
-this.networkStream = new EventSource(`${host}/api/network.rt`);
-this.networkStream.onmessage = (e) => {
-  const data = JSON.parse(e.data);
-  updateSceneObjects(
-    objects.tracks,
-    data.tracks.map((track) => ({ ...track, id: JSON.stringify(track.path) })),
-    ({ path }) => {
-      const lineGeometry = new LineGeometry();
-      lineGeometry.setPositions(path.flatMap((p) => [p.x, p.y, p.z]));
-      const line = new Line2(lineGeometry, lineMaterial);
-      return line;
-    },
-    (line, { path }) => {
-      line.geometry.setPositions(path.flatMap((p) => [p.x, p.y, p.z]));
-      line.geometry.attributes.position.needsUpdate = true;
-    }
-  );
-
-  updateSceneObjects(
-    objects.stations,
-    data.stations,
-    ({ location }) => {
-      const cube = new THREE.Mesh(stationGeometry, stationMaterial);
-      cube.position.set(location.x, location.y, location.z);
-      return cube;
-    },
-    (cube, { location }) => {
-      cube.position.set(location.x, location.y, location.z);
-    }
-  );
-};
-
-this.blocksStream = new EventSource(`${host}/api/blocks.rt`);
-this.blocksStream.onmessage = (e) => {
-  const data = JSON.parse(e.data);
-  updateSceneObjects(
-    objects.blocks,
-    data.blocks
-      .flatMap((block) =>
-        block.reserved || block.occupied ? block.segments : []
-      )
-      .map((segment) => ({ ...segment, id: JSON.stringify(segment.path) })),
-    ({ path }) => {
-      const lineGeometry = new LineGeometry();
-      lineGeometry.setPositions(path.flatMap((p) => [p.x, p.y + 0.01, p.z]));
-      const line = new Line2(lineGeometry, lineMaterialReserved);
-      return line;
-    },
-    (line, { path }) => {
-      line.geometry.setPositions(path.flatMap((p) => [p.x, p.y + 0.01, p.z]));
-      line.geometry.attributes.position.needsUpdate = true;
-    }
-  );
-};
-
+const trainVelocities = new Map();
+const previousTrainPositions = new Map();
 const updateTrain = (cube, { car, train, index }) => {
   const leading = new THREE.Vector3(
     car.leading.location.x,
@@ -174,88 +132,6 @@ const updateTrain = (cube, { car, train, index }) => {
   cube.scale.set(5, 5, carLength * 0.8);
 };
 
-const trainVelocities = new Map();
-const previousTrainPositions = new Map();
-this.trainStatusStream = new EventSource(`${host}/api/trains.rt`);
-this.trainStatusStream.onmessage = (e) => {
-  const data = JSON.parse(e.data);
-  const currentTime = performance.now();
-  // updateMarkerObjects(
-  //   objects.trainsNames,
-  //   data.trains.map((train) => ({
-  //     name: train.name,
-  //     id: train.id,
-  //     position: train.cars[Math.floor(train.cars.length / 2)].leading.location,
-  //   })),
-  //   (data) => {
-  //     const marker = new BlueMap.HtmlMarker();
-  //     marker.html = `
-  //       <div id="bm-marker-train-${data.id}" class="bm-marker-player">
-  //           <div class="bm-player-name">${data.name}</div>
-  //       </div>
-  //     `;
-  //     return marker;
-  //   },
-  //   (marker, data, _) => {
-  //     marker.position.x = data.position.x;
-  //     marker.position.y = data.position.y + 2;
-  //     marker.position.z = data.position.z;
-  //   }
-  // );
-
-  updateSceneObjects(
-    objects.trains,
-    data.trains.flatMap((train) =>
-      train.cars.map((car, index) => ({
-        car,
-        train,
-        index,
-        id: `${train.id}:${index}`,
-      }))
-    ),
-    (data) => {
-      const cube = new THREE.Mesh(stationGeometry, stationMaterial);
-      updateTrain(cube, data);
-      previousTrainPositions.set(data.id, {
-        position: cube.position.clone(),
-        time: currentTime,
-      });
-
-      return cube;
-    },
-    (cube, data, _) => {
-      const prevData = previousTrainPositions.get(data.id);
-      const newPosition = new THREE.Vector3(
-        data.car.leading.location.x,
-        data.car.leading.location.y,
-        data.car.leading.location.z
-      );
-
-      if (prevData) {
-        const dt = (currentTime - prevData.time) / 1000;
-        const velocity = newPosition
-          .clone()
-          .sub(prevData.position)
-          .divideScalar(dt || 1);
-        trainVelocities.set(data.id, velocity);
-      }
-
-      previousTrainPositions.set(data.id, {
-        position: newPosition.clone(),
-        time: currentTime,
-      });
-
-      updateTrain(cube, data);
-    }
-  );
-};
-
-const selectMaterial = {
-  RED: signalRedMaterial,
-  GREEN: signalGreenMaterial,
-  YELLOW: signalYellowMaterial,
-};
-
 const updateSignal = (line, { location, forward, reverse }) => {
   const state = { ...forward, ...reverse };
   line.material = selectMaterial[state.state];
@@ -271,25 +147,166 @@ const updateSignal = (line, { location, forward, reverse }) => {
   line.rotation.y =
     (forward ? -Math.PI : Math.PI) + (-state.angle * Math.PI) / 180;
 };
-this.signalsStream = new EventSource(`${host}/api/signals.rt`);
-this.signalsStream.onmessage = (e) => {
-  const data = JSON.parse(e.data);
-  updateSceneObjects(
-    objects.signals,
-    data.signals.map((signal) => ({
-      ...signal,
-      id: JSON.stringify(signal.location),
-    })),
-    (data) => {
-      const line = new Line2(signalGeometry, selectMaterial["RED"]);
-      updateSignal(line, data);
-      return line;
-    },
-    (line, data) => {
-      updateSignal(line, data);
-    }
-  );
-};
+
+const streams = {};
+
+function createStreams() {
+  streams.networkStream = new EventSource(`${host}/api/network.rt`);
+  streams.networkStream.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    updateSceneObjects(
+      objects.tracks,
+      data.tracks
+        .filter((track) => isCurrentWorld(track.dimension))
+        .map((track) => ({ ...track, id: JSON.stringify(track.path) })),
+      ({ path }) => {
+        const lineGeometry = new LineGeometry();
+        lineGeometry.setPositions(path.flatMap((p) => [p.x, p.y, p.z]));
+        const line = new Line2(lineGeometry, lineMaterial);
+        return line;
+      },
+      (line, { path }) => {
+        line.geometry.setPositions(path.flatMap((p) => [p.x, p.y, p.z]));
+        line.geometry.attributes.position.needsUpdate = true;
+      }
+    );
+
+    updateSceneObjects(
+      objects.stations,
+      data.stations.filter((station) => isCurrentWorld(station.dimension)),
+      ({ location }) => {
+        const cube = new THREE.Mesh(stationGeometry, stationMaterial);
+        cube.position.set(location.x, location.y, location.z);
+        return cube;
+      },
+      (cube, { location }) => {
+        cube.position.set(location.x, location.y, location.z);
+      }
+    );
+  };
+
+  streams.blocksStream = new EventSource(`${host}/api/blocks.rt`);
+  streams.blocksStream.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    updateSceneObjects(
+      objects.blocks,
+      data.blocks
+        .flatMap((block) =>
+          block.reserved || block.occupied ? block.segments : []
+        )
+        .filter((segment) => isCurrentWorld(segment.dimension))
+        .map((segment) => ({ ...segment, id: JSON.stringify(segment.path) })),
+      ({ path }) => {
+        const lineGeometry = new LineGeometry();
+        lineGeometry.setPositions(path.flatMap((p) => [p.x, p.y + 0.01, p.z]));
+        const line = new Line2(lineGeometry, lineMaterialReserved);
+        return line;
+      },
+      (line, { path }) => {
+        line.geometry.setPositions(path.flatMap((p) => [p.x, p.y + 0.01, p.z]));
+        line.geometry.attributes.position.needsUpdate = true;
+      }
+    );
+  };
+
+  streams.trainStatusStream = new EventSource(`${host}/api/trains.rt`);
+  streams.trainStatusStream.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    const currentTime = performance.now();
+    // updateMarkerObjects(
+    //   objects.trainsNames,
+    //   data.trains.map((train) => ({
+    //     name: train.name,
+    //     id: train.id,
+    //     position: train.cars[Math.floor(train.cars.length / 2)].leading.location,
+    //   })),
+    //   (data) => {
+    //     const marker = new BlueMap.HtmlMarker();
+    //     marker.html = `
+    //       <div id="bm-marker-train-${data.id}" class="bm-marker-player">
+    //           <div class="bm-player-name">${data.name}</div>
+    //       </div>
+    //     `;
+    //     return marker;
+    //   },
+    //   (marker, data, _) => {
+    //     marker.position.x = data.position.x;
+    //     marker.position.y = data.position.y + 2;
+    //     marker.position.z = data.position.z;
+    //   }
+    // );
+
+    updateSceneObjects(
+      objects.trains,
+      data.trains
+        .flatMap((train) =>
+          train.cars.map((car, index) => ({
+            car,
+            train,
+            index,
+            id: `${train.id}:${index}`,
+          }))
+        )
+        .filter(({ car }) => isCurrentWorld(car.leading.dimension)),
+      (data) => {
+        const cube = new THREE.Mesh(stationGeometry, stationMaterial);
+        updateTrain(cube, data);
+        previousTrainPositions.set(data.id, {
+          position: cube.position.clone(),
+          time: currentTime,
+        });
+
+        return cube;
+      },
+      (cube, data, _) => {
+        const prevData = previousTrainPositions.get(data.id);
+        const newPosition = new THREE.Vector3(
+          data.car.leading.location.x,
+          data.car.leading.location.y,
+          data.car.leading.location.z
+        );
+
+        if (prevData) {
+          const dt = (currentTime - prevData.time) / 1000;
+          const velocity = newPosition
+            .clone()
+            .sub(prevData.position)
+            .divideScalar(dt || 1);
+          trainVelocities.set(data.id, velocity);
+        }
+
+        previousTrainPositions.set(data.id, {
+          position: newPosition.clone(),
+          time: currentTime,
+        });
+
+        updateTrain(cube, data);
+      }
+    );
+  };
+
+  streams.signalsStream = new EventSource(`${host}/api/signals.rt`);
+  streams.signalsStream.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    updateSceneObjects(
+      objects.signals,
+      data.signals
+        .filter((signal) => isCurrentWorld(signal.dimension))
+        .map((signal) => ({
+          ...signal,
+          id: JSON.stringify(signal.location),
+        })),
+      (data) => {
+        const line = new Line2(signalGeometry, selectMaterial["RED"]);
+        updateSignal(line, data);
+        return line;
+      },
+      (line, data) => {
+        updateSignal(line, data);
+      }
+    );
+  };
+}
 
 window.addEventListener("resize", () => {
   lineMaterial.resolution.set(window.innerWidth, window.innerHeight);
@@ -303,6 +320,20 @@ window.addEventListener("resize", () => {
   signalGreenMaterial.needsUpdate = true;
   signalYellowMaterial.needsUpdate = true;
 });
+
+let world = currentWorld();
+setInterval(() => {
+  const current = currentWorld();
+  if (world !== current) {
+    world = currentWorld();
+
+    streams.networkStream.close();
+    streams.blocksStream.close();
+    streams.signalsStream.close();
+    streams.trainStatusStream.close();
+    createStreams();
+  }
+}, 100);
 
 hijack(
   mapViewer,
@@ -323,6 +354,8 @@ hijack(
       renderer.render(scene, mapViewer.camera);
     }
 );
+
+createStreams();
 
 function hijack(object, funcName, override) {
   object[funcName] = override(object[funcName]);
